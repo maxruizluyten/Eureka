@@ -1,0 +1,36 @@
+env_name: crafter
+task: crafter
+description: |
+  Crafter is an open-world survival game used as a reinforcement learning (RL) benchmark. The game focuses on evaluating an agent's general capabilities by presenting a procedurally generated, 2D environment where agents interact through visual inputs.
+  
+  The overall goal is: Collect as much meat as possible within 10 minutes of gameplay. The type of meat does not matter. Each item of meat collected counts for 1 point. The goal is to maximise the number of points collected within 10 minutes of gameplay.
+  
+  The world is a procedurally generated 64x64 grid with terrain types including grasslands, forests, lakes, mountains, and caves. The agent has survival needs including health, hunger, thirst, and rest, which must be maintained.
+  
+  Resources that can be collected include:
+  - Wood (from trees)
+  - Stone
+  - Coal
+  - Iron
+  - Diamonds
+  - Saplings (plants that can be grown for food)
+  
+  The agent can craft tools using a crafting table and furnace:
+  - Wood Pickaxe and Wood Sword
+  - Stone Pickaxe and Stone Sword
+  - Iron Pickaxe and Iron Sword
+  
+  Creatures in the environment include:
+  - Cows: Source of meat (food) - the primary goal
+  - Zombies: Appear in grasslands, especially at night
+  - Skeletons: Found in caves; they attack with arrows
+  
+  The observation is a 64x64 pixel RGB image showing a top-down view of the world. The action space has 17 actions including movement, interacting with objects, crafting tools, and placing objects.
+  
+  To collect meat efficiently, the agent typically needs to:
+  1. Collect saplings
+  2. Craft tools to defend against enemies
+  3. Navigate to cows or grow cows from saplings
+  4. Collect meat from cows
+  
+  The reward function should focus on maximizing meat collection while taking into account the necessary steps to achieve this goal. 
