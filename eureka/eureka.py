@@ -268,7 +268,9 @@ def main(cfg):
                                           f'--reward_file=env_iter{iter}_response{response_id}.py',
                                           f'--config_path={cfg.env.config_path if hasattr(cfg.env, "config_path") else ""}',
                                           f'--iterations={cfg.max_iterations}',
-                                          f'--capture_video={cfg.capture_video}'],
+                                          f'--capture_video={cfg.capture_video}',
+                                          f'--seed=42',
+                                          f'--use_wandb'],
                                           stdout=f, stderr=f)
             block_until_training(rl_filepath, log_status=True, iter_num=iter, response_id=response_id)
             rl_runs.append(process)
