@@ -26,7 +26,27 @@ from utils.create_task import create_task
 from utils.extract_task_code import *
 
 EUREKA_ROOT_DIR = os.getcwd()
-ISAAC_ROOT_DIR = f"{EUREKA_ROOT_DIR}/../isaacgymenvs/isaacgymenvs"
+
+def log_openai_messages(messages, output_dir, iter_num=0, response_id=0):
+    """Log the messages sent to OpenAI to a file in the output directory"""
+    # Create path if it doesn't exist
+    if not os.path.exists(output_dir):
+        os.makedirs(output_dir)
+    
+    # Log messages to a JSON file
+    messages_file = os.path.join(output_dir, f"openai_messages_iter{iter_num}_response{response_id}.json")
+    with open(messages_file, 'w') as f:
+        json.dump(messages, f, indent=2)
+    
+    # Also create a more readable text version
+    text_file = os.path.join(output_dir, f"openai_messages_iter{iter_num}_response{response_id}.txt")
+    with open(text_file, 'w') as f:
+        for msg in messages:
+            f.write(f"Role: {msg['role']}\n")
+            f.write(f"Content:\n{msg['content']}\n")
+            f.write("-" * 80 + "\n")
+    
+    logging.info(f"Logged OpenAI messages to {messages_file} and {text_file}")
 
 @hydra.main(config_path="cfg", config_name="config", version_base="1.1")
 def main(cfg):
@@ -39,37 +59,34 @@ def main(cfg):
     logging.info(f"Using Azure OpenAI API with model: {cfg.model} (mapped to: {llm_client.model})")
 
     task = cfg.env.task
-
     suffix = cfg.suffix
     model = cfg.model
     logging.info(f"Using LLM: {model}")
     logging.info("Task: " + task)
 
     env_name = cfg.env.env_name.lower()
-    # Add special handling for the crafter environment
-    if env_name.startswith('crafter'):
-        env_parent = 'crafter'
-        # Load config file to get the game prompt file
-        if hasattr(cfg.env, 'config_path') and os.path.exists(cfg.env.config_path):
-            with open(cfg.env.config_path, 'r') as f:
-                config_content = yaml.safe_load(f)
-                # Get game_prompt_file from the config
-                if 'game_prompt_file' in config_content:
-                    prompt_path = f"/home/mr971/strategist/prompts/{config_content['game_prompt_file']}"
-                    logging.info(f"Using prompt file from config: {prompt_path}")
-                    
-                    # Load the prompt file to get the task description
-                    if os.path.exists(prompt_path):
-                        with open(prompt_path, 'r') as pf:
-                            prompt_content = pf.read()
-                            # Extract task description from the YAML file
-                            if 'goal_context' in prompt_content:
-                                task_description = prompt_content.split('goal_context: |')[1].strip().split('\n\n')[0].strip()
-                                logging.info(f"Using task description from prompt file: {task_description}")
-    else:
-        task_description = cfg.env.description
-        logging.info("Task description: " + task_description)
-        env_parent = 'isaac' if f'{env_name}.py' in os.listdir(f'{EUREKA_ROOT_DIR}/envs/isaac') else 'dexterity'
+    # Crafter-specific environment handling
+    env_parent = 'crafter'
+    # Load config file to get the game prompt file
+    if hasattr(cfg.env, 'config_path') and os.path.exists(cfg.env.config_path):
+        with open(cfg.env.config_path, 'r') as f:
+            config_content = yaml.safe_load(f)
+            # Get game_prompt_file from the config
+            if 'game_prompt_file' in config_content:
+                prompt_path = f"/home/mr971/strategist/prompts/{config_content['game_prompt_file']}"
+                logging.info(f"Using prompt file from config: {prompt_path}")
+                
+                # Load the prompt file to get the task description
+                if os.path.exists(prompt_path):
+                    with open(prompt_path, 'r') as pf:
+                        prompt_content = pf.read()
+                        # Extract task description from the YAML file
+                        if 'goal_context' in prompt_content:
+                            task_description = prompt_content.split('goal_context: |')[1].strip().split('\n\n')[0].strip()
+                            logging.info(f"Using task description from prompt file: {task_description}")
+                        if 'game_context' in prompt_content:
+                            environment_details = prompt_content.split('game_context: |')[1].strip().split('\n\n')[0].strip()
+                            logging.info(f"Using environment details from prompt file: {environment_details}")
     
     task_file = f'{EUREKA_ROOT_DIR}/envs/{env_parent}/{env_name}.py'
     task_obs_file = f'{EUREKA_ROOT_DIR}/envs/{env_parent}/{env_name}_obs.py'
@@ -77,11 +94,8 @@ def main(cfg):
     task_code_string = file_to_string(task_file)
     task_obs_code_string = file_to_string(task_obs_file)
     
-    # Adjust output file path based on environment type
-    if env_parent == 'crafter':
-        output_file = f"{workspace_dir}/crafter_task_{suffix.lower()}.py"
-    else:
-        output_file = f"{ISAAC_ROOT_DIR}/tasks/{env_name}{suffix.lower()}.py"
+    # Set output file path for crafter
+    output_file = f"{workspace_dir}/crafter_task_{suffix.lower()}.py"
 
     # Loading all text prompts
     prompt_dir = f'{EUREKA_ROOT_DIR}/utils/prompts'
@@ -94,12 +108,10 @@ def main(cfg):
     execution_error_feedback = file_to_string(f'{prompt_dir}/execution_error_feedback.txt')
 
     initial_system = initial_system.format(task_reward_signature_string=reward_signature) + code_output_tip
-    initial_user = initial_user.format(task_obs_code_string=task_obs_code_string, task_description=task_description)
+    initial_user = initial_user.format(task_obs_code_string=task_obs_code_string, task_description=task_description, environment_details=environment_details)
     messages = [{"role": "system", "content": initial_system}, {"role": "user", "content": initial_user}]
 
     task_code_string = task_code_string.replace(task, task+suffix)
-    # Create Task YAML files
-    create_task(ISAAC_ROOT_DIR, cfg.env.task, cfg.env.env_name, suffix)
 
     DUMMY_FAILURE = -10000.
     max_successes = []
@@ -127,9 +139,12 @@ def main(cfg):
                 break
             
             # Generate multiple samples in a loop since Azure client doesn't support 'n' parameter
-            for _ in range(min(chunk_size, cfg.sample - total_samples)):
+            for response_id in range(min(chunk_size, cfg.sample - total_samples)):
                 for attempt in range(1000):
                     try:
+                        # Log the messages being sent to OpenAI
+                        log_openai_messages(messages, f"{workspace_dir}/openai_logs", iter, response_id)
+                        
                         # Use AzureOpenAIClient instead of direct openai call
                         response_cur = llm_client.get_completion(
                             messages=messages,
@@ -248,23 +263,13 @@ def main(cfg):
             # Execute the python file with flags
             rl_filepath = f"env_iter{iter}_response{response_id}.txt"
             with open(rl_filepath, 'w') as f:
-                if env_parent == 'crafter':
-                    # Run the crafter environment with the generated reward function
-                    process = subprocess.Popen(['python', '-u', f'{EUREKA_ROOT_DIR}/utils/run_crafter.py',
-                                              f'--reward_file=env_iter{iter}_response{response_id}.py',
-                                              f'--config_path={cfg.env.config_path if hasattr(cfg.env, "config_path") else ""}',
-                                              f'--iterations={cfg.max_iterations}',
-                                              f'--capture_video={cfg.capture_video}'],
-                                              stdout=f, stderr=f)
-                else:
-                    # Original Isaac Gym command
-                    process = subprocess.Popen(['python', '-u', f'{ISAAC_ROOT_DIR}/train.py',  
-                                            'hydra/output=subprocess',
-                                            f'task={task}{suffix}', f'wandb_activate={cfg.use_wandb}',
-                                            f'wandb_entity={cfg.wandb_username}', f'wandb_project={cfg.wandb_project}',
-                                            f'headless={not cfg.capture_video}', f'capture_video={cfg.capture_video}', 'force_render=False',
-                                            f'max_iterations={cfg.max_iterations}'],
-                                            stdout=f, stderr=f)
+                # Run the crafter environment with the generated reward function
+                process = subprocess.Popen(['python', '-u', f'{EUREKA_ROOT_DIR}/utils/run_crafter.py',
+                                          f'--reward_file=env_iter{iter}_response{response_id}.py',
+                                          f'--config_path={cfg.env.config_path if hasattr(cfg.env, "config_path") else ""}',
+                                          f'--iterations={cfg.max_iterations}',
+                                          f'--capture_video={cfg.capture_video}'],
+                                          stdout=f, stderr=f)
             block_until_training(rl_filepath, log_status=True, iter_num=iter, response_id=response_id)
             rl_runs.append(process)
         
@@ -408,58 +413,13 @@ def main(cfg):
         with open('messages.json', 'w') as file:
             json.dump(messages, file, indent=4)
     
-    # Evaluate the best reward code many times
+    # Evaluate the best reward code
     if max_reward_code_path is None: 
         logging.info("All iterations of code generation failed, aborting...")
         logging.info("Please double check the output env_iter*_response*.txt files for repeating errors!")
         exit()
     logging.info(f"Task: {task}, Max Training Success {max_success_overall}, Correlation {max_success_reward_correlation_overall}, Best Reward Code Path: {max_reward_code_path}")
-    logging.info(f"Evaluating best reward code {cfg.num_eval} times")
     shutil.copy(max_reward_code_path, output_file)
-    
-    eval_runs = []
-    for i in range(cfg.num_eval):
-        set_freest_gpu()
-        
-        # Execute the python file with flags
-        rl_filepath = f"reward_code_eval{i}.txt"
-        with open(rl_filepath, 'w') as f:
-            process = subprocess.Popen(['python', '-u', f'{ISAAC_ROOT_DIR}/train.py',  
-                                        'hydra/output=subprocess',
-                                        f'task={task}{suffix}', f'wandb_activate={cfg.use_wandb}',
-                                        f'wandb_entity={cfg.wandb_username}', f'wandb_project={cfg.wandb_project}',
-                                        f'headless={not cfg.capture_video}', f'capture_video={cfg.capture_video}', 'force_render=False', f'seed={i}',
-                                        ],
-                                        stdout=f, stderr=f)
-
-        block_until_training(rl_filepath)
-        eval_runs.append(process)
-
-    reward_code_final_successes = []
-    reward_code_correlations_final = []
-    for i, rl_run in enumerate(eval_runs):
-        rl_run.communicate()
-        rl_filepath = f"reward_code_eval{i}.txt"
-        with open(rl_filepath, 'r') as f:
-            stdout_str = f.read() 
-        lines = stdout_str.split('\n')
-        for i, line in enumerate(lines):
-            if line.startswith('Tensorboard Directory:'):
-                break 
-        tensorboard_logdir = line.split(':')[-1].strip() 
-        tensorboard_logs = load_tensorboard_logs(tensorboard_logdir)
-        max_success = max(tensorboard_logs['consecutive_successes'])
-        reward_code_final_successes.append(max_success)
-
-        if "gt_reward" in tensorboard_logs and "gpt_reward" in tensorboard_logs:
-            gt_reward = np.array(tensorboard_logs["gt_reward"])
-            gpt_reward = np.array(tensorboard_logs["gpt_reward"])
-            reward_correlation = np.corrcoef(gt_reward, gpt_reward)[0, 1]
-            reward_code_correlations_final.append(reward_correlation)
-
-    logging.info(f"Final Success Mean: {np.mean(reward_code_final_successes)}, Std: {np.std(reward_code_final_successes)}, Raw: {reward_code_final_successes}")
-    logging.info(f"Final Correlation Mean: {np.mean(reward_code_correlations_final)}, Std: {np.std(reward_code_correlations_final)}, Raw: {reward_code_correlations_final}")
-    np.savez('final_eval.npz', reward_code_final_successes=reward_code_final_successes, reward_code_correlations_final=reward_code_correlations_final)
 
 
 if __name__ == "__main__":
