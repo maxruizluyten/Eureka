@@ -127,3 +127,21 @@ If you find our work useful, please consider citing us!
 
 Disclaimer: This project is strictly for research purposes, and not an official product from NVIDIA.
 
+## Using Azure OpenAI API
+
+Eureka now supports using Azure OpenAI API through a custom client implementation. To use Azure OpenAI:
+
+1. Set environment variables:
+   ```bash
+   export AZURE_OPENAI_ENDPOINT="your-azure-endpoint"
+   export AZURE_OPENAI_API_KEY="your-azure-api-key"
+   ```
+
+2. The model names in your config will be automatically mapped to Azure deployment names according to this mapping:
+   ```
+   "gpt-4o": "gpt-4o-glob1"
+   "gpt-4o-mini": "gpt-4o-mini-glob1"
+   ```
+
+3. If you're using a different model or deployment name, you can modify these mappings in `/home/mr971/strategist/openai_client.py`.
+

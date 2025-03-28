@@ -1,0 +1,5 @@
+env_name: crafter
+task: crafter
+
+# Use the config settings to load prompt dynamically
+config_path: /home/mr971/strategist/configs/crafter-mod-farm_gpt-4o.yaml 

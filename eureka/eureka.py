@@ -4,12 +4,21 @@ import json
 import logging 
 import matplotlib.pyplot as plt
 import os
-import openai
 import re
 import subprocess
 from pathlib import Path
 import shutil
 import time 
+import yaml
+import sys
+
+# Add strategist to path for importing the OpenAI client
+STRATEGIST_PATH = "/home/mr971/strategist"
+if STRATEGIST_PATH not in sys.path:
+    sys.path.append(STRATEGIST_PATH)
+
+# Import AzureOpenAIClient instead of using openai directly
+from strategist.openai_client import AzureOpenAIClient, MODEL_TO_NAME
 
 from utils.misc import * 
 from utils.file_utils import find_files_with_substring, load_tensorboard_logs
@@ -25,24 +34,54 @@ def main(cfg):
     logging.info(f"Workspace: {workspace_dir}")
     logging.info(f"Project Root: {EUREKA_ROOT_DIR}")
 
-    openai.api_key = os.getenv("OPENAI_API_KEY")
+    # Initialize AzureOpenAIClient instead of setting openai.api_key
+    llm_client = AzureOpenAIClient(model=cfg.model)
+    logging.info(f"Using Azure OpenAI API with model: {cfg.model} (mapped to: {llm_client.model})")
 
     task = cfg.env.task
-    task_description = cfg.env.description
+
     suffix = cfg.suffix
     model = cfg.model
     logging.info(f"Using LLM: {model}")
     logging.info("Task: " + task)
-    logging.info("Task description: " + task_description)
 
     env_name = cfg.env.env_name.lower()
-    env_parent = 'isaac' if f'{env_name}.py' in os.listdir(f'{EUREKA_ROOT_DIR}/envs/isaac') else 'dexterity'
+    # Add special handling for the crafter environment
+    if env_name.startswith('crafter'):
+        env_parent = 'crafter'
+        # Load config file to get the game prompt file
+        if hasattr(cfg.env, 'config_path') and os.path.exists(cfg.env.config_path):
+            with open(cfg.env.config_path, 'r') as f:
+                config_content = yaml.safe_load(f)
+                # Get game_prompt_file from the config
+                if 'game_prompt_file' in config_content:
+                    prompt_path = f"/home/mr971/strategist/prompts/{config_content['game_prompt_file']}"
+                    logging.info(f"Using prompt file from config: {prompt_path}")
+                    
+                    # Load the prompt file to get the task description
+                    if os.path.exists(prompt_path):
+                        with open(prompt_path, 'r') as pf:
+                            prompt_content = pf.read()
+                            # Extract task description from the YAML file
+                            if 'goal_context' in prompt_content:
+                                task_description = prompt_content.split('goal_context: |')[1].strip().split('\n\n')[0].strip()
+                                logging.info(f"Using task description from prompt file: {task_description}")
+    else:
+        task_description = cfg.env.description
+        logging.info("Task description: " + task_description)
+        env_parent = 'isaac' if f'{env_name}.py' in os.listdir(f'{EUREKA_ROOT_DIR}/envs/isaac') else 'dexterity'
+    
     task_file = f'{EUREKA_ROOT_DIR}/envs/{env_parent}/{env_name}.py'
     task_obs_file = f'{EUREKA_ROOT_DIR}/envs/{env_parent}/{env_name}_obs.py'
     shutil.copy(task_obs_file, f"env_init_obs.py")
-    task_code_string  = file_to_string(task_file)
-    task_obs_code_string  = file_to_string(task_obs_file)
-    output_file = f"{ISAAC_ROOT_DIR}/tasks/{env_name}{suffix.lower()}.py"
+    task_code_string = file_to_string(task_file)
+    task_obs_code_string = file_to_string(task_obs_file)
+    
+    # Adjust output file path based on environment type
+    if env_parent == 'crafter':
+        output_file = f"{workspace_dir}/crafter_task_{suffix.lower()}.py"
+    else:
+        output_file = f"{ISAAC_ROOT_DIR}/tasks/{env_name}{suffix.lower()}.py"
 
     # Loading all text prompts
     prompt_dir = f'{EUREKA_ROOT_DIR}/utils/prompts'
@@ -86,30 +125,50 @@ def main(cfg):
         while True:
             if total_samples >= cfg.sample:
                 break
-            for attempt in range(1000):
-                try:
-                    response_cur = openai.ChatCompletion.create(
-                        model=model,
-                        messages=messages,
-                        temperature=cfg.temperature,
-                        n=chunk_size
-                    )
-                    total_samples += chunk_size
+            
+            # Generate multiple samples in a loop since Azure client doesn't support 'n' parameter
+            for _ in range(min(chunk_size, cfg.sample - total_samples)):
+                for attempt in range(1000):
+                    try:
+                        # Use AzureOpenAIClient instead of direct openai call
+                        response_cur = llm_client.get_completion(
+                            messages=messages,
+                            max_tokens=3000,
+                            #temperature=cfg.temperature
+                        )
+                        
+                        # Extract choices from the response - format adaptation
+                        choices = []
+                        for choice in response_cur.choices:
+                            choices.append({"message": {"content": choice.message.content}})
+                        
+                        # Add just one response at a time
+                        responses.append(choices[0])
+                        total_samples += 1
+                        
+                        # Extract token usage information
+                        if hasattr(response_cur, 'usage'):
+                            if 'prompt_tokens' not in locals():
+                                prompt_tokens = response_cur.usage.prompt_tokens
+                            completion_tokens = response_cur.usage.completion_tokens
+                            total_token += response_cur.usage.total_tokens
+                            total_completion_token += completion_tokens
+                        
+                        break
+                    except Exception as e:
+                        if attempt >= 10:
+                            chunk_size = max(int(chunk_size / 2), 1)
+                            print("Current Chunk Size", chunk_size)
+                        logging.info(f"Attempt {attempt+1} failed with error: {e}")
+                        time.sleep(1)
+                
+                # Break the outer loop if we couldn't generate a response after max attempts
+                if attempt == 999:
                     break
-                except Exception as e:
-                    if attempt >= 10:
-                        chunk_size = max(int(chunk_size / 2), 1)
-                        print("Current Chunk Size", chunk_size)
-                    logging.info(f"Attempt {attempt+1} failed with error: {e}")
-                    time.sleep(1)
-            if response_cur is None:
+            
+            if len(responses) < 1:
                 logging.info("Code terminated due to too many failed attempts!")
                 exit()
-
-            responses.extend(response_cur["choices"])
-            prompt_tokens = response_cur["usage"]["prompt_tokens"]
-            total_completion_token += response_cur["usage"]["completion_tokens"]
-            total_token += response_cur["usage"]["total_tokens"]
 
         if cfg.sample == 1:
             logging.info(f"Iteration {iter}: GPT Output:\n " + responses[0]["message"]["content"] + "\n")
@@ -119,7 +178,7 @@ def main(cfg):
         
         code_runs = [] 
         rl_runs = []
-        for response_id in range(cfg.sample):
+        for response_id in range(min(cfg.sample, len(responses))):
             response_cur = responses[response_id]["message"]["content"]
             logging.info(f"Iteration {iter}: Processing Code Run {response_id}")
 
@@ -189,7 +248,17 @@ def main(cfg):
             # Execute the python file with flags
             rl_filepath = f"env_iter{iter}_response{response_id}.txt"
             with open(rl_filepath, 'w') as f:
-                process = subprocess.Popen(['python', '-u', f'{ISAAC_ROOT_DIR}/train.py',  
+                if env_parent == 'crafter':
+                    # Run the crafter environment with the generated reward function
+                    process = subprocess.Popen(['python', '-u', f'{EUREKA_ROOT_DIR}/utils/run_crafter.py',
+                                              f'--reward_file=env_iter{iter}_response{response_id}.py',
+                                              f'--config_path={cfg.env.config_path if hasattr(cfg.env, "config_path") else ""}',
+                                              f'--iterations={cfg.max_iterations}',
+                                              f'--capture_video={cfg.capture_video}'],
+                                              stdout=f, stderr=f)
+                else:
+                    # Original Isaac Gym command
+                    process = subprocess.Popen(['python', '-u', f'{ISAAC_ROOT_DIR}/train.py',  
                                             'hydra/output=subprocess',
                                             f'task={task}{suffix}', f'wandb_activate={cfg.use_wandb}',
                                             f'wandb_entity={cfg.wandb_username}', f'wandb_project={cfg.wandb_project}',
