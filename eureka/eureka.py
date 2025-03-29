@@ -11,6 +11,7 @@ import shutil
 import time 
 import yaml
 import sys
+import psutil
 
 # Add strategist to path for importing the OpenAI client
 STRATEGIST_PATH = "/home/mr971/strategist"
@@ -266,7 +267,9 @@ def main(cfg):
                                           f'--config_path={cfg.env.config_path if hasattr(cfg.env, "config_path") else ""}',
                                           f'--iterations={cfg.max_iterations}',
                                           f'--seed=42',
-                                          f'--use_wandb'],
+                                          f'--use_wandb',
+                                          f'--debug'
+                                        ],
                                           stdout=f, stderr=f)
             block_until_training(rl_filepath, log_status=True, iter_num=iter, response_id=response_id)
             rl_runs.append(process)
@@ -280,7 +283,40 @@ def main(cfg):
         
         exec_success = False 
         for response_id, (code_run, rl_run) in enumerate(zip(code_runs, rl_runs)):
-            rl_run.communicate()
+            try:
+                # Add timeout to prevent hanging indefinitely
+                logging.info(f"Iteration {iter}: Waiting for subprocess {response_id} to complete (timeout: 30s)")
+                rl_run.communicate(timeout=30)  # 30 second timeout
+                logging.info(f"Iteration {iter}: Subprocess {response_id} completed or timed out")
+            except subprocess.TimeoutExpired:
+                logging.info(f"Iteration {iter}: Code Run {response_id} subprocess timed out, forcibly terminating")
+                # Try to terminate the process and its children
+                try:
+                    parent = psutil.Process(rl_run.pid)
+                    for child in parent.children(recursive=True):
+                        try:
+                            child.terminate()
+                            logging.info(f"Terminated child process {child.pid}")
+                        except:
+                            pass
+                    rl_run.terminate()
+                    logging.info(f"Terminated parent process {rl_run.pid}")
+                    # Give processes time to terminate
+                    time.sleep(2)
+                    # If still running, try to kill
+                    if rl_run.poll() is None:
+                        logging.info(f"Process {rl_run.pid} still running, killing it")
+                        rl_run.kill()
+                except Exception as e:
+                    logging.error(f"Error terminating subprocess: {e}")
+            
+            # Try to kill any remaining wandb processes
+            try:
+                subprocess.run(['pkill', '-f', 'wandb'], stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+                logging.info("Attempted to kill any remaining wandb processes")
+            except:
+                pass
+                
             rl_filepath = f"env_iter{iter}_response{response_id}.txt"
             code_paths.append(f"env_iter{iter}_response{response_id}.py")
             try:
@@ -310,7 +346,16 @@ def main(cfg):
                 if found_tensorboard_dir:
                     tensorboard_logdir = line.split(':')[-1].strip() 
                     tensorboard_logs = load_tensorboard_logs(tensorboard_logdir)
-                    max_iterations = np.array(tensorboard_logs['gt_reward']).shape[0]
+                    max_iterations = np.array(tensorboard_logs.get('gt_reward', [])).shape[0]
+                    
+                    # If tensorboard logs empty or insufficient, provide fallback message
+                    if max_iterations == 0:
+                        logging.warning(f"Iteration {iter}: Code Run {response_id} no tensorboard metrics found")
+                        content += "Training completed but no tensorboard metrics were found. This could mean the training didn't record metrics properly.\n"
+                        successes.append(DUMMY_FAILURE)
+                        reward_correlations.append(DUMMY_FAILURE)
+                        continue
+                        
                     epoch_freq = max(int(max_iterations // 10), 1)
                     
                     content += policy_feedback.format(epoch_freq=epoch_freq)
@@ -319,17 +364,18 @@ def main(cfg):
                     success_found = False
                     
                     # Compute Correlation between Human-Engineered and GPT Rewards
-                    if "gt_reward" in tensorboard_logs and "gpt_reward" in tensorboard_logs:
+                    if "gt_reward" in tensorboard_logs and "gpt_reward" in tensorboard_logs and len(tensorboard_logs["gt_reward"]) > 0 and len(tensorboard_logs["gpt_reward"]) > 0:
                         gt_reward = np.array(tensorboard_logs["gt_reward"])
                         gpt_reward = np.array(tensorboard_logs["gpt_reward"])
                         reward_correlation = np.corrcoef(gt_reward, gpt_reward)[0, 1]
                         reward_correlations.append(reward_correlation)
                     else:
+                        logging.warning(f"Iteration {iter}: Code Run {response_id} missing reward metrics")
                         reward_correlations.append(DUMMY_FAILURE)
 
                     # Add reward components log to the feedback
                     for metric in tensorboard_logs:
-                        if "/" not in metric:
+                        if "/" not in metric and len(tensorboard_logs[metric]) > 0:
                             metric_cur = ['{:.2f}'.format(x) for x in tensorboard_logs[metric][::epoch_freq]]
                             metric_cur_max = max(tensorboard_logs[metric])
                             metric_cur_mean = sum(tensorboard_logs[metric]) / len(tensorboard_logs[metric])
