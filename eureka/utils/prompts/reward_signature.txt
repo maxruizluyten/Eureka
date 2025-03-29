@@ -1,4 +1,3 @@
-@torch.jit.script
-def compute_reward(obs_dict: Dict[str, Any]) -> Tuple[torch.Tensor, Dict[str, torch.Tensor]]:
+def compute_reward(obs_dict: Dict[str, any]) -> Tuple[torch.Tensor, Dict[str, torch.Tensor]]:
     ...
     return reward, {}

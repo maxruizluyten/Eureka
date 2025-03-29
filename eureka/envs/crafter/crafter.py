@@ -47,7 +47,6 @@ class CrafterTask:
         return self.rew_buf, self.extras
         
 # Default reward function (to be replaced by GPT)
-@torch.jit.script
 def compute_reward_gpt(obs: torch.Tensor) -> tuple[torch.Tensor, dict]:
     # Default implementation - just return a constant reward
     reward = torch.tensor([0.0])

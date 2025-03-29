@@ -311,14 +311,30 @@ def main():
     except Exception as e:
         logger.error(f"Failed to load reward function: {e}")
         logger.error(traceback.format_exc())
+        # Print tensorboard directory even on failure to ensure eureka.py can find it
+        log_dir, video_dir, export_dir = create_output_dirs(args.reward_file)
+        print(f"Tensorboard Directory: {log_dir}")
+        logger.info(f"Tensorboard Directory: {log_dir}")
         return 1
     
     # Create output directories
     log_dir, video_dir, export_dir = create_output_dirs(args.reward_file)
+    # Print the tensorboard directory early so eureka.py can find it even if there's an error
+    print(f"Tensorboard Directory: {log_dir}")
+    logger.info(f"Tensorboard Directory: {log_dir}")
     
     # Create a tensorboard-like log file
     log_file = log_dir / "training_log.yaml"
-    logs = {"gt_reward": [], "gpt_reward": {}}
+    logs = {"gt_reward": [], "gpt_reward": []}
+    
+    # Initial logs with default values to avoid empty log files
+    dummy_value = 0.0
+    logs["gt_reward"].append(dummy_value)
+    logs["gpt_reward"].append(dummy_value)
+    
+    # Write initial logs to ensure the file exists even if training fails
+    with open(log_file, 'w') as f:
+        yaml.dump(logs, f)
     
     # Run multiple training runs if specified
     for run in range(args.n_runs):

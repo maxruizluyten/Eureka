@@ -111,8 +111,6 @@ def main(cfg):
     initial_user = initial_user.format(task_obs_code_string=task_obs_code_string, task_description=task_description, environment_details=environment_details)
     messages = [{"role": "system", "content": initial_system}, {"role": "user", "content": initial_user}]
 
-    task_code_string = task_code_string.replace(task, task+suffix)
-
     DUMMY_FAILURE = -10000.
     max_successes = []
     max_successes_reward_correlation = []
@@ -247,8 +245,6 @@ def main(cfg):
                 file.writelines("import math" + '\n')
                 file.writelines("import torch" + '\n')
                 file.writelines("from torch import Tensor" + '\n')
-                if "@torch.jit.script" not in code_string:
-                    code_string = "@torch.jit.script\n" + code_string
                 file.writelines(code_string + '\n')
 
             with open(f"env_iter{iter}_response{response_id}_rewardonly.py", 'w') as file:
@@ -264,11 +260,11 @@ def main(cfg):
             rl_filepath = f"env_iter{iter}_response{response_id}.txt"
             with open(rl_filepath, 'w') as f:
                 # Run the crafter environment with the generated reward function
+                print(f"Running crafter environment with the generated reward function")
                 process = subprocess.Popen(['python', '-u', f'{EUREKA_ROOT_DIR}/utils/run_crafter.py',
                                           f'--reward_file=env_iter{iter}_response{response_id}.py',
                                           f'--config_path={cfg.env.config_path if hasattr(cfg.env, "config_path") else ""}',
                                           f'--iterations={cfg.max_iterations}',
-                                          f'--capture_video={cfg.capture_video}',
                                           f'--seed=42',
                                           f'--use_wandb'],
                                           stdout=f, stderr=f)
@@ -305,42 +301,63 @@ def main(cfg):
                 # If RL execution has no error, provide policy statistics feedback
                 exec_success = True
                 lines = stdout_str.split('\n')
+                found_tensorboard_dir = False
                 for i, line in enumerate(lines):
                     if line.startswith('Tensorboard Directory:'):
+                        found_tensorboard_dir = True
                         break 
-                tensorboard_logdir = line.split(':')[-1].strip() 
-                tensorboard_logs = load_tensorboard_logs(tensorboard_logdir)
-                max_iterations = np.array(tensorboard_logs['gt_reward']).shape[0]
-                epoch_freq = max(int(max_iterations // 10), 1)
                 
-                content += policy_feedback.format(epoch_freq=epoch_freq)
-                
-                # Compute Correlation between Human-Engineered and GPT Rewards
-                if "gt_reward" in tensorboard_logs and "gpt_reward" in tensorboard_logs:
-                    gt_reward = np.array(tensorboard_logs["gt_reward"])
-                    gpt_reward = np.array(tensorboard_logs["gpt_reward"])
-                    reward_correlation = np.corrcoef(gt_reward, gpt_reward)[0, 1]
-                    reward_correlations.append(reward_correlation)
+                if found_tensorboard_dir:
+                    tensorboard_logdir = line.split(':')[-1].strip() 
+                    tensorboard_logs = load_tensorboard_logs(tensorboard_logdir)
+                    max_iterations = np.array(tensorboard_logs['gt_reward']).shape[0]
+                    epoch_freq = max(int(max_iterations // 10), 1)
+                    
+                    content += policy_feedback.format(epoch_freq=epoch_freq)
+                    
+                    # Initialize success value 
+                    success_found = False
+                    
+                    # Compute Correlation between Human-Engineered and GPT Rewards
+                    if "gt_reward" in tensorboard_logs and "gpt_reward" in tensorboard_logs:
+                        gt_reward = np.array(tensorboard_logs["gt_reward"])
+                        gpt_reward = np.array(tensorboard_logs["gpt_reward"])
+                        reward_correlation = np.corrcoef(gt_reward, gpt_reward)[0, 1]
+                        reward_correlations.append(reward_correlation)
+                    else:
+                        reward_correlations.append(DUMMY_FAILURE)
 
-                # Add reward components log to the feedback
-                for metric in tensorboard_logs:
-                    if "/" not in metric:
-                        metric_cur = ['{:.2f}'.format(x) for x in tensorboard_logs[metric][::epoch_freq]]
-                        metric_cur_max = max(tensorboard_logs[metric])
-                        metric_cur_mean = sum(tensorboard_logs[metric]) / len(tensorboard_logs[metric])
-                        if "consecutive_successes" == metric:
-                            successes.append(metric_cur_max)
-                        metric_cur_min = min(tensorboard_logs[metric])
-                        if metric != "gt_reward" and metric != "gpt_reward":
-                            if metric != "consecutive_successes":
-                                metric_name = metric 
+                    # Add reward components log to the feedback
+                    for metric in tensorboard_logs:
+                        if "/" not in metric:
+                            metric_cur = ['{:.2f}'.format(x) for x in tensorboard_logs[metric][::epoch_freq]]
+                            metric_cur_max = max(tensorboard_logs[metric])
+                            metric_cur_mean = sum(tensorboard_logs[metric]) / len(tensorboard_logs[metric])
+                            if "consecutive_successes" == metric:
+                                successes.append(metric_cur_max)
+                                success_found = True
+                            metric_cur_min = min(tensorboard_logs[metric])
+                            if metric != "gt_reward" and metric != "gpt_reward":
+                                if metric != "consecutive_successes":
+                                    metric_name = metric 
+                                else:
+                                    metric_name = "task_score"
+                                content += f"{metric_name}: {metric_cur}, Max: {metric_cur_max:.2f}, Mean: {metric_cur_mean:.2f}, Min: {metric_cur_min:.2f} \n"                    
                             else:
-                                metric_name = "task_score"
-                            content += f"{metric_name}: {metric_cur}, Max: {metric_cur_max:.2f}, Mean: {metric_cur_mean:.2f}, Min: {metric_cur_min:.2f} \n"                    
-                        else:
-                            # Provide ground-truth score when success rate not applicable
-                            if "consecutive_successes" not in tensorboard_logs:
-                                content += f"ground-truth score: {metric_cur}, Max: {metric_cur_max:.2f}, Mean: {metric_cur_mean:.2f}, Min: {metric_cur_min:.2f} \n"                    
+                                # Provide ground-truth score when success rate not applicable
+                                if "consecutive_successes" not in tensorboard_logs:
+                                    content += f"ground-truth score: {metric_cur}, Max: {metric_cur_max:.2f}, Mean: {metric_cur_mean:.2f}, Min: {metric_cur_min:.2f} \n"  
+                    
+                    # If no success metric was found, add a dummy failure
+                    if not success_found:
+                        successes.append(DUMMY_FAILURE)
+                else:
+                    # Even though there's no traceback, we couldn't find the tensorboard directory
+                    logging.info(f"Iteration {iter}: Code Run {response_id} couldn't find tensorboard directory")
+                    successes.append(DUMMY_FAILURE)
+                    reward_correlations.append(DUMMY_FAILURE)
+                    content += execution_error_feedback.format(traceback_msg="Training completed but no tensorboard logs were generated.")
+                
                 code_feedbacks.append(code_feedback)
                 content += code_feedback  
             else:
