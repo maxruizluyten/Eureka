@@ -3,7 +3,12 @@ import os
 import json
 import logging
 import time
+import sys
 
+# Add the parent directory to sys.path
+sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
+# Import with absolute path
 from utils.extract_task_code import file_to_string
 
 def set_freest_gpu():

@@ -11,10 +11,17 @@ import yaml
 import matplotlib.pyplot as plt
 from pathlib import Path
 import traceback
+from stable_baselines3.common.vec_env import DummyVecEnv
 
 # Set up logging first, before any imports that might use it
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
+
+# Add current directory to path for imports
+current_dir = os.path.dirname(os.path.abspath(__file__))
+if current_dir not in sys.path:
+    sys.path.append(current_dir)
+    logger.info(f"Added current directory to path: {current_dir}")
 
 # Add crafter to the path
 CRAFTER_PATH = "/home/mr971/strategist/data/crafter"
@@ -106,9 +113,9 @@ def load_prompt(config):
 def create_output_dirs(reward_file):
     """Create output directories for logs and videos"""
     base_name = Path(reward_file).stem
-    log_dir = Path(f"./logs/{base_name}")
-    video_dir = Path(f"./videos/{base_name}")
-    export_dir = Path(f"./export/{base_name}")
+    log_dir = Path(f"/home/mr971/strategist/Eureka/eureka/logs/{base_name}")
+    video_dir = Path(f"/home/mr971/strategist/Eureka/eureka/videos/{base_name}")
+    export_dir = Path(f"/home/mr971/strategist/Eureka/eureka/export/{base_name}")
     
     log_dir.mkdir(parents=True, exist_ok=True)
     video_dir.mkdir(parents=True, exist_ok=True)
@@ -146,16 +153,24 @@ def train_agent_with_eureka_reward(reward_fn, agent_config, env_name="crafter", 
                          difficulty=difficulty,
                          seed=seed)
             logger.info(f"Created environment using get_env with difficulty={difficulty}, seed={seed}")
+            
+            # Use standard DummyVecEnv
+            env = DummyVecEnv([lambda: env])
+            logger.info("Wrapped environment with DummyVecEnv")
         except Exception as e:
             logger.warning(f"Error using get_env: {e}, falling back to direct env creation")
             logger.error(traceback.format_exc())
-            env = crafter.Env(reward=True)
-            logger.info("Created environment directly with crafter.Env(reward=True)")
+            env = crafter.Env(reward=True, custom_reward_func=reward_fn)
+            # Use standard DummyVecEnv
+            env = DummyVecEnv([lambda: env])
+            logger.info("Created environment directly with crafter.Env and wrapped with DummyVecEnv")
     else:
         # Fall back to direct creation if get_env is not available
         logger.warning("get_env not available, falling back to direct env creation")
-        env = crafter.Env(reward=True)
-        logger.info("Created environment directly with crafter.Env(reward=True)")
+        env = crafter.Env(reward=True, custom_reward_func=reward_fn)
+        # Use standard DummyVecEnv
+        env = DummyVecEnv([lambda: env])
+        logger.info("Created environment directly with crafter.Env and wrapped with DummyVecEnv")
     
     # Log environment properties
     logger.info(f"Environment: {env}")
@@ -226,79 +241,43 @@ def run_training(reward_fn, iterations, difficulty="normal", seed=None, checkpoi
         agent.load_from_checkpoint(checkpoint)
     
     # After training, run evaluation episodes to capture videos and collect rewards
-    episode_gt_rewards = []
-    episode_gpt_rewards = []
+    episode_true_rewards = []
+    episode_custom_rewards = []
     
-    # Always run at least 5 evaluation episodes
-    eval_episodes = 10
+    # Always run at least 100 evaluation episodes
+    eval_episodes = 5
     logger.info(f"Running {eval_episodes} evaluation episodes for reward collection...")
     
     for i in range(eval_episodes):
         logger.info(f"Running evaluation episode {i+1}/{eval_episodes}")
-        try:
-            trajectory, episode_gt_reward = agent.run_one_episode()
-            logger.info(f"Episode {i+1} - Trajectory length: {len(trajectory)}, GT reward: {episode_gt_reward}")
-            episode_gt_rewards.append(float(episode_gt_reward))
-            
-            # Calculate GPT reward
-            episode_gpt_reward = 0
-            for step_idx, (_, _, obs, _, _, _) in enumerate(trajectory):
-                try:
-                    # Log the observation shape for debugging
-                    logger.debug(f"Episode {i+1}, Step {step_idx} - Observation shape: {obs.shape}, type: {type(obs)}")
-                    
-                    # Get reward from GPT reward function
-                    obs_tensor = torch.tensor(obs).unsqueeze(0).float()
-                    logger.debug(f"Tensor shape: {obs_tensor.shape}, tensor type: {obs_tensor.dtype}")
-                    
-                    reward_result = reward_fn(obs_tensor)
-                    logger.debug(f"Raw reward result: {reward_result}, type: {type(reward_result)}")
-                    
-                    # Handle different return types (single value or tuple with dict)
-                    if isinstance(reward_result, tuple):
-                        reward_value, reward_dict = reward_result
-                        logger.debug(f"Reward value from tuple: {reward_value}, dict keys: {reward_dict.keys() if isinstance(reward_dict, dict) else 'not a dict'}")
-                    else:
-                        reward_value = reward_result
-                        logger.debug(f"Direct reward value: {reward_value}")
-                    
-                    # Ensure reward_value is a float
-                    reward_value = float(reward_value)
-                    logger.debug(f"Final reward value (after float conversion): {reward_value}")
-                    
-                    episode_gpt_reward += reward_value
-                except Exception as e:
-                    logger.error(f"Error calculating GPT reward at step {step_idx}: {e}")
-                    logger.error(traceback.format_exc())
-                    # Use a default reward of 0 for this step if calculation fails
-                    logger.warning(f"Using default reward of 0 for this step due to error")
-            
-            episode_gpt_rewards.append(float(episode_gpt_reward))
-            logger.info(f"Episode {i+1} completed - GT reward: {episode_gt_reward:.2f}, GPT reward: {episode_gpt_reward:.2f}")
-            
-            # Save frames if video capture is enabled
-            if video_dir:
-                for step, (_, _, obs, _, _, _) in enumerate(trajectory):
-                    if step % 10 == 0:  # Save every 10th frame
-                        plt.figure(figsize=(8, 8))
-                        plt.imshow(obs)
-                        plt.title(f"Episode {i+1}, Step {step}, GT: {episode_gt_reward:.2f}, GPT: {episode_gpt_reward:.2f}")
-                        plt.savefig(Path(video_dir) / f"episode_{i+1}_step_{step:05d}.png")
-                        plt.close()
-        except Exception as e:
-            logger.error(f"Error during episode {i+1}: {e}")
-            logger.error(traceback.format_exc())
-            logger.warning(f"Skipping episode {i+1} due to error")
-            # Add placeholder values for this episode
-            episode_gt_rewards.append(0.0)
-            episode_gpt_rewards.append(0.0)
+        trajectory, _, _ = agent.run_one_episode()
+        # Calculate GPT reward
+        episode_true_reward = 0
+        episode_custom_reward = 0
+        for step_idx, (_, _, _, _, _, info) in enumerate(trajectory):
+            episode_true_reward += info[0]['true_reward']
+            episode_custom_reward += info[0]['custom_reward']
+        
+        episode_true_rewards.append(float(episode_true_reward))
+        episode_custom_rewards.append(float(episode_custom_reward))
+        logger.info(f"Episode {i+1} completed - True reward: {episode_true_reward:.2f}, Custom reward: {episode_custom_reward:.2f}")
+        
+        # Save frames if video capture is enabled
+        if video_dir:
+            for step, (_, _, obs, _, _, _) in enumerate(trajectory):
+                if step % 10 == 0:  # Save every 10th frame
+                    plt.figure(figsize=(8, 8))
+                    plt.imshow(obs)
+                    plt.title(f"Episode {i+1}, Step {step}, GT: {episode_gt_reward:.2f}, GPT: {episode_gpt_reward:.2f}")
+                    plt.savefig(Path(video_dir) / f"episode_{i+1}_step_{step:05d}.png")
+                    plt.close()
     
     # Log the final reward lists for debugging
-    logger.info(f"Collected GT rewards: {episode_gt_rewards}")
-    logger.info(f"Collected GPT rewards: {episode_gpt_rewards}")
+    logger.info(f"Collected True rewards: {episode_true_rewards}")
+    logger.info(f"Collected Custom rewards: {episode_custom_rewards}")
     
     # Return the agent and collected rewards
-    return agent, episode_gt_rewards, episode_gpt_rewards
+    return agent, episode_true_rewards, episode_custom_rewards
 
 def main():
     parser = argparse.ArgumentParser(description="Run Crafter with a GPT-generated reward function")
@@ -356,10 +335,6 @@ def main():
     log_file = log_dir / "training_log.yaml"
     logs = {"gt_reward": [], "gpt_reward": []}
     
-    # Write initial logs to ensure the file exists even if training fails
-    with open(log_file, 'w') as f:
-        yaml.dump(logs, f)
-    
     # Run multiple training runs if specified
     for run in range(args.n_runs):
         logger.info(f"Starting run {run+1}/{args.n_runs}")
@@ -376,6 +351,10 @@ def main():
                 # Create an environment and agent without training
                 logger.info("Setting up environment and agent for evaluation only")
                 env = crafter.Env(reward=True)
+                
+                # Wrap with our custom vector environment
+                env = DummyVecEnv([lambda: env])
+                logger.info("Created environment and wrapped with DummyVecEnv for evaluation")
                 
                 # Load PPO config
                 ppo_config = load_config('/home/mr971/strategist/configs/rl_agent-ppo.yaml')

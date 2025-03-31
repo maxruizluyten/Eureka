@@ -13,6 +13,10 @@ import yaml
 import sys
 import psutil
 
+# Get the absolute path to the cfg directory
+SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
+CFG_PATH = os.path.join(SCRIPT_DIR, "cfg")
+
 # Add strategist to path for importing the OpenAI client
 STRATEGIST_PATH = "/home/mr971/strategist"
 if STRATEGIST_PATH not in sys.path:
@@ -21,12 +25,21 @@ if STRATEGIST_PATH not in sys.path:
 # Import AzureOpenAIClient instead of using openai directly
 from strategist.openai_client import AzureOpenAIClient, MODEL_TO_NAME
 
-from utils.misc import * 
-from utils.file_utils import find_files_with_substring, load_tensorboard_logs
-from utils.create_task import create_task
-from utils.extract_task_code import *
+# Import local modules using relative paths
+import os
+# Add the utils directory to sys.path
+current_dir = os.path.dirname(os.path.abspath(__file__))
+utils_dir = os.path.join(current_dir, "utils")
+sys.path.append(utils_dir)
 
-EUREKA_ROOT_DIR = os.getcwd()
+# Import utils modules directly
+from misc import set_freest_gpu, block_until_training, filter_traceback
+from file_utils import find_files_with_substring, load_tensorboard_logs
+from create_task import create_task
+from extract_task_code import file_to_string, get_function_signature
+
+# Set EUREKA_ROOT_DIR to the Eureka directory, not the current working directory
+EUREKA_ROOT_DIR = "/home/mr971/strategist/Eureka/eureka"
 
 def log_openai_messages(messages, output_dir, iter_num=0, response_id=0):
     """Log the messages sent to OpenAI to a file in the output directory"""
@@ -89,8 +102,8 @@ def main(cfg):
                             environment_details = prompt_content.split('game_context: |')[1].strip().split('\n\n')[0].strip()
                             logging.info(f"Using environment details from prompt file: {environment_details}")
     
-    task_file = f'{EUREKA_ROOT_DIR}/envs/{env_parent}/{env_name}.py'
-    task_obs_file = f'{EUREKA_ROOT_DIR}/envs/{env_parent}/{env_name}_obs.py'
+    task_file = f'/home/mr971/strategist/Eureka/eureka/envs/crafter/crafter.py'
+    task_obs_file = f'/home/mr971/strategist/Eureka/eureka/envs/crafter/crafter_obs.py'
     shutil.copy(task_obs_file, f"env_init_obs.py")
     task_code_string = file_to_string(task_file)
     task_obs_code_string = file_to_string(task_obs_file)
@@ -99,7 +112,7 @@ def main(cfg):
     output_file = f"{workspace_dir}/crafter_task_{suffix.lower()}.py"
 
     # Loading all text prompts
-    prompt_dir = f'{EUREKA_ROOT_DIR}/utils/prompts'
+    prompt_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'utils', 'prompts')
     initial_system = file_to_string(f'{prompt_dir}/initial_system.txt')
     code_output_tip = file_to_string(f'{prompt_dir}/code_output_tip.txt')
     code_feedback = file_to_string(f'{prompt_dir}/code_feedback.txt')
@@ -238,7 +251,6 @@ def main(cfg):
                 task_code_string_iter = task_code_string.replace("def compute_reward(self, actions):", "def compute_reward(self, actions):\n" + reward_signature)
             else:
                 raise NotImplementedError
-
             # Save the new environment code when the output contains valid code string!
             with open(output_file, 'w') as file:
                 file.writelines(task_code_string_iter + '\n')
@@ -248,28 +260,27 @@ def main(cfg):
                 file.writelines("from torch import Tensor" + '\n')
                 file.writelines(code_string + '\n')
 
-            with open(f"env_iter{iter}_response{response_id}_rewardonly.py", 'w') as file:
+            with open(f"{workspace_dir}/env_iter{iter}_response{response_id}_rewardonly.py", 'w') as file:
                 file.writelines(code_string + '\n')
 
             # Copy the generated environment code to hydra output directory for bookkeeping
-            shutil.copy(output_file, f"env_iter{iter}_response{response_id}.py")
+            shutil.copy(output_file, f"{workspace_dir}/env_iter{iter}_response{response_id}.py")
 
             # Find the freest GPU to run GPU-accelerated RL
             set_freest_gpu()
             
             # Execute the python file with flags
-            rl_filepath = f"env_iter{iter}_response{response_id}.txt"
+            rl_filepath = f"{workspace_dir}/env_iter{iter}_response{response_id}.txt"
             with open(rl_filepath, 'w') as f:
                 # Run the crafter environment with the generated reward function
                 print(f"Running crafter environment with the generated reward function")
                 process = subprocess.Popen(['python', '-u', f'{EUREKA_ROOT_DIR}/utils/run_crafter.py',
-                                          f'--reward_file=env_iter{iter}_response{response_id}.py',
+                                          f'--reward_file={workspace_dir}/env_iter{iter}_response{response_id}.py',
                                           f'--config_path={cfg.env.config_path if hasattr(cfg.env, "config_path") else ""}',
                                           f'--iterations={cfg.max_iterations}',
                                           f'--seed=42',
-                                          f'--use_wandb',
-                                          f'--debug'
-                                        ],
+                                          f'--use_wandb'
+                                        ],  
                                           stdout=f, stderr=f)
             block_until_training(rl_filepath, log_status=True, iter_num=iter, response_id=response_id)
             rl_runs.append(process)
@@ -286,7 +297,7 @@ def main(cfg):
             try:
                 # Add timeout to prevent hanging indefinitely
                 logging.info(f"Iteration {iter}: Waiting for subprocess {response_id} to complete (timeout: 30s)")
-                rl_run.communicate(timeout=30)  # 30 second timeout
+                rl_run.communicate()  # 30 second timeout
                 logging.info(f"Iteration {iter}: Subprocess {response_id} completed or timed out")
             except subprocess.TimeoutExpired:
                 logging.info(f"Iteration {iter}: Code Run {response_id} subprocess timed out, forcibly terminating")
@@ -309,16 +320,9 @@ def main(cfg):
                         rl_run.kill()
                 except Exception as e:
                     logging.error(f"Error terminating subprocess: {e}")
-            
-            # Try to kill any remaining wandb processes
-            try:
-                subprocess.run(['pkill', '-f', 'wandb'], stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-                logging.info("Attempted to kill any remaining wandb processes")
-            except:
-                pass
                 
-            rl_filepath = f"env_iter{iter}_response{response_id}.txt"
-            code_paths.append(f"env_iter{iter}_response{response_id}.py")
+            rl_filepath = f"{workspace_dir}/env_iter{iter}_response{response_id}.txt"
+            code_paths.append(f"{workspace_dir}/env_iter{iter}_response{response_id}.py")
             try:
                 with open(rl_filepath, 'r') as f:
                     stdout_str = f.read() 

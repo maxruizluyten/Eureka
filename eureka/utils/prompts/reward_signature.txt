@@ -1,5 +1,3 @@
 def compute_reward(obs_dict: Dict[str, any]) -> Tuple[torch.Tensor, Dict[str, torch.Tensor]]:
-    print("obs_dict: ", obs_dict)
     ...
-    print("reward ", reward)
     return reward, {}
